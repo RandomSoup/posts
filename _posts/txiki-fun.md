@@ -9,7 +9,7 @@ and [curl](https://curl.se/). Both QuickJS and txiki are relatively small,
 fast, and have very hackable codebases.
 
 ## QuickJS and Duktape
-I (alv) am a big fan of [Duktape](https://duktape.org/), another small embeddable
+I am a big fan of [Duktape](https://duktape.org/), another small embeddable
 JS stack-based engine. Despite it being small, it's used by big projects
 like [Netsurf](http://www.netsurf-browser.org/) as their engine. It has always
 seemed like the obvious option for any JS embedding work for me, since I
@@ -72,7 +72,7 @@ this isn't actually recommended and/or supported, since QuickJS's bytecode
 representation can change between releases, and Fabrice Bellard himself said
 that it shouldn't even be stored to disk, but it's fun anyways :P
 
-So I made a [patch](00_bytecode.patch) for txiki and its modified `qjsc`.
+So I made a [patch](../assets/00_bytecode.patch) for txiki and its modified `qjsc`.
 The code is hacky and kind of cursed, and since I haven't had much contact
 with the codebases before it probably doesn't fully follow their conventions.
 The `qjsc` side was easy, the patch just makes it emit raw bytecode instead

@@ -12,9 +12,6 @@ minima:
 
 remote_theme: jekyll/minima
 
-include:
- - _pages
-
 exclude: 
  - .gitignore
  - LICENSE
