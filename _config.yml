@@ -1,14 +1,21 @@
-title: [B|Dev]log
+title: "[B|Dev]logs"
 description: RandomSoup blog, kind of.
 show_excerpts: true
 
+base_url: /posts
+
 minima:
   date_format: "%Y-%m-%d %H:%M"
+  skin: dark
   social_links:
     github: RandomSoup
 
-theme: minima
+remote_theme: jekyll/minima
 
-plugins:
- - jekyll-feed
- - jekyll-seo-tag
+include:
+ - _pages
+
+exclude: 
+ - .gitignore
+ - LICENSE
+ - README.md
