@@ -1,0 +1,14 @@
+title: [B|Dev]log
+description: RandomSoup blog, kind of.
+show_excerpts: true
+
+minima:
+  date_format: "%Y-%m-%d %H:%M"
+  social_links:
+    github: RandomSoup
+
+theme: minima
+
+plugins:
+ - jekyll-feed
+ - jekyll-seo-tag

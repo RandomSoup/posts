@@ -1,0 +1,101 @@
+---
+author: Alvarito050506
+---
+# txiki.js fun
+
+[txiki.js](https://github.com/saghul/txiki.js) is a small JavaScript runtime
+built around [QuickJS](https://bellard.org/quickjs/), [libuv](https://libuv.org/),
+and [curl](https://curl.se/). Both QuickJS and txiki are relatively small,
+fast, and have very hackable codebases.
+
+## QuickJS and Duktape
+I (alv) am a big fan of [Duktape](https://duktape.org/), another small embeddable
+JS stack-based engine. Despite it being small, it's used by big projects
+like [Netsurf](http://www.netsurf-browser.org/) as their engine. It has always
+seemed like the obvious option for any JS embedding work for me, since I
+was familiar with it and thought it was the fastest of these small engines.
+Until I actually looked into QuickJS! In [comparision](https://bellard.org/quickjs/bench.html)
+with Duktape, it's smaller, supports more features (Duktape supports ES5.1
+plus some ES6/7 features and extensions, while QuickJS supports full-ish ES2020),
+and runs faster (almost as fast as [Hermes](https://hermesengine.dev), that is **27 MiB**).
+
+API-wise, I can't really tell if I like Duktape's lower-level approach or
+QuickJS's not-by-much-higher-level approach. Both support almost any platform
+and can compile to WebAssembly, and are licensed under an MIT license.
+
+_Anyways..._
+
+## QuickJS
+As you may have noticed, QuickJS is great, but here are some more "technical"
+details:
+ + It compiles JS to an internal bytecode format directly, and executes it.
+   This means no immediate trees, faster performance, and lower memory usage.
+ + It doesn't support CommonJS modules natively, but it does support ES6
+   modules.
+ + You can "compile" your JS modules into bytecode contained in a C array
+   and then link against QuickJS to produce standalone (or shared) executables.
+ + It has an official minimal runtime, `qjs`, which provides a `console`
+   object and some basic path/URL/file manipulation functions.
+ + TODO: Add more stuff here?
+
+## txiki itself
+txiki provides web-like APIs (`XMLHttpRequest`, [custom] events, workers,
+the `console` object, and a `window` alias for `globalThis`), plus some
+custom features like raw sockets, Unix-specific stuff, and misc modules
+like `path` (exposed globally) and `fs` (as a proper module). Aditionally,
+there's optional WASM and (basic?) [WASI](https://wasi.dev) support via
+[wasm3](https://github.com/wasm3/wasm3) (note that it's an interpreter and
+not a JIT compiler!).
+
+## Loading JS/bytecode/WASM/JSON/native code
+QuickJS allows you to set a custom ES6 module loader via the `JS_SetModuleLoaderFunc`
+function, and that's what runtimes like `qjs` and txiki do. txiki's loader,
+[`tjs_module_loader`](https://github.com/saghul/txiki.js/blob/master/src/modules.c#L71),
+is able to load JS files (duh) and WASM modules when support is compiled
+in. In the past it was able to load native modules, but support was [removed](https://github.com/saghul/txiki.js/commit/f7bef82f380c5310ed58efacbc602272118089b1)
+for [some reason](https://github.com/saghul/txiki.js/issues/159#issuecomment-749551308).
+I guess that after QuickJS's API slightly changed around that time, efforts
+to migrate that part of the code failed. I tried to re-add this feature,
+but I couldn't get a simple native module to work, so I'm not sure if it
+worked or not.
+
+Anyways, you have probably heard of cold-start latency before (if not, I
+recommend reading [Making JavaScript run fast on WebAssembly](https://bytecodealliance.org/articles/making-javascript-run-fast-on-webassembly),
+an interesting article touching various interesting topics). Interpreted/JIT'd
+languages suffer from this problem, Java being the supreme and ultimate example
+(try executing a "Hello World" Java program :P). JavaScript virtual machines
+suffer from this too, and since QuickJS isn't optimized for performance
+(e.g. it doesn't do JIT) it can't really compensate it. So I thought about
+compiling JS into bytecode ahead-of-time with `qjsc`, and then modifying
+`tjs_module_loader` to support loading precompiled bytecode. _Of course_
+this isn't actually recommended and/or supported, since QuickJS's bytecode
+representation can change between releases, and Fabrice Bellard himself said
+that it shouldn't even be stored to disk, but it's fun anyways :P
+
+So I made a [patch](00_bytecode.patch) for txiki and its modified `qjsc`.
+The code is hacky and kind of cursed, and since I haven't had much contact
+with the codebases before it probably doesn't fully follow their conventions.
+The `qjsc` side was easy, the patch just makes it emit raw bytecode instead
+of a C file containing an array. The txiki side was trickier, but then again
+the codebase is really hackable and easy to understand: it basically uses
+an internal function to get the pre-compiled module object instead of calling
+`JS_Eval` in compilation-only mode.
+
+<small>Oh also, the speed up seems to be minimal, but I haven't benchmarked it</small>
+
+---
+
+All the following sections are Works-In-Progress.
+
+## The JS side
+TODO: Document this.
+
+## Speeding up with preloaded modules
+TODO: Investigate why preloading modules seems to be way faster than loading
+them on demand, and doesn't seem to slow down cold starts.
+
+## Integrating yyjson
+TODO: Maybe actually do this.
+
+## Other stuff
+TODO: Document it.

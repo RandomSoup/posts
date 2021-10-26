@@ -1,0 +1,393 @@
+commit 0ce2197c65cb0514f52823ba6f6e690c455ea6af
+Author: Alvarito050506 <donfrutosgomez@gmail.com>
+Date:   Mon Oct 25 16:23:13 2021 -0300
+
+    Binary loading
+
+diff --git a/src/bootstrap.c b/src/bootstrap.c
+index 601519d..2191a5a 100644
+--- a/src/bootstrap.c
++++ b/src/bootstrap.c
+@@ -70,20 +70,31 @@ extern const uint32_t uuid_size;
+ extern const uint8_t wasm[];
+ extern const uint32_t wasm_size;
+ 
+-
+-int tjs__eval_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len) {
+-    JSValue obj = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
+-    if (JS_IsException(obj))
++int tjs__load_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len, JSValue* obj) {
++    JSValue tmp = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
++    if (JS_IsException(tmp))
+         goto error;
+ 
+-    if (JS_VALUE_GET_TAG(obj) == JS_TAG_MODULE) {
+-        if (JS_ResolveModule(ctx, obj) < 0) {
+-            JS_FreeValue(ctx, obj);
++    if (JS_VALUE_GET_TAG(tmp) == JS_TAG_MODULE) {
++        if (JS_ResolveModule(ctx, tmp) < 0) {
++            JS_FreeValue(ctx, tmp);
+             goto error;
+         }
+-        js_module_set_import_meta(ctx, obj, FALSE, TRUE);
++        js_module_set_import_meta(ctx, tmp, FALSE, TRUE);
+     }
++    *obj = tmp;
++    return 0;
++
++error:
++    tjs_dump_error(ctx);
++    return -1;
++}
++
++int tjs__eval_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len) {
++    JSValue obj;
+ 
++    if (tjs__load_binary(ctx, buf, buf_len, &obj))
++        return -1;
+     JSValue val = JS_EvalFunction(ctx, obj);
+     if (JS_IsException(val))
+         goto error;
+diff --git a/src/cli.c b/src/cli.c
+index 9b70570..3e25d59 100644
+--- a/src/cli.c
++++ b/src/cli.c
+@@ -54,6 +54,7 @@ typedef struct FileItem {
+ 
+ typedef struct Flags {
+     bool interactive;
++    bool binary;
+     bool empty_run;
+     bool strict_module_detection;
+     struct list_head preload_modules;
+@@ -95,11 +96,11 @@ static int eval_buf(JSContext *ctx, const char *buf, const char *filename, int e
+     return ret;
+ }
+ 
+-static int eval_module(JSContext *ctx, const char *filepath, char *override_filename, int eval_flags) {
++static int eval_module(JSContext *ctx, const char *filepath, char *override_filename, int eval_flags, bool binary) {
+     JSValue val;
+     int ret = 0;
+ 
+-    val = TJS_EvalFile(ctx, filepath, eval_flags, true, override_filename);
++    val = TJS_EvalFile(ctx, filepath, eval_flags, true, override_filename, binary);
+     if (JS_IsException(val)) {
+         tjs_dump_error(ctx);
+         ret = -1;
+@@ -118,6 +119,7 @@ static void print_help(void) {
+            "  -l, --load FILENAME             module to preload (option can be repeated)\n"
+            "  -i, --interactive               go to interactive mode\n"
+            "  -q, --quit                      just instantiate the interpreter and quit\n"
++           "  -b, --binary                    execute pre-compiled bytecode\n"
+            "  --abort-on-unhandled-rejection  abort when a rejected promise is not caught\n"
+            "  --override-filename FILENAME    override filename in error messages\n"
+            "  --stack-size STACKSIZE          set max stack size\n"
+@@ -194,6 +196,7 @@ int main(int argc, char **argv) {
+     TJS_DefaultOptions(&runOptions);
+ 
+     Flags flags = { .interactive = false,
++                    .binary = false,
+                     .empty_run = false,
+                     .strict_module_detection = false,
+                     .eval_expr = NULL,
+@@ -287,6 +290,10 @@ int main(int argc, char **argv) {
+                 runOptions.no_abort_on_unhandled_rejection = true;
+                 break;
+             }
++            if (opt.key == 'b' || is_longopt(opt, "binary")) {
++                flags.binary = true;
++                break;
++            }
+             report_unknown_option(&opt);
+             exit_code = EXIT_INVALID_ARG;
+             goto exit;
+@@ -305,7 +312,7 @@ int main(int argc, char **argv) {
+     list_for_each(el, &flags.preload_modules) {
+         FileItem *file = list_entry(el, FileItem, link);
+         int eval_flags = get_eval_flags(file->path, flags.strict_module_detection);
+-        if (eval_module(ctx, file->path, NULL, eval_flags)) {
++        if (eval_module(ctx, file->path, NULL, eval_flags, has_suffix(file->path, ".qjsbin"))) {
+             exit_code = EXIT_FAILURE;
+             goto exit;
+         }
+@@ -322,7 +329,7 @@ int main(int argc, char **argv) {
+     } else {
+         const char *filepath = argv[optind];
+         int eval_flags = get_eval_flags(filepath, flags.strict_module_detection);
+-        if (eval_module(ctx, filepath, flags.override_filename, eval_flags)) {
++        if (eval_module(ctx, filepath, flags.override_filename, eval_flags, flags.binary)) {
+             exit_code = EXIT_FAILURE;
+             goto exit;
+         }
+diff --git a/src/modules.c b/src/modules.c
+index 3c0e985..597e710 100644
+--- a/src/modules.c
++++ b/src/modules.c
+@@ -76,7 +76,7 @@ JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *op
+ 
+     JSModuleDef *m;
+     JSValue func_val;
+-    int r, is_json;
++    int r, is_json, is_bin;
+     DynBuf dbuf;
+ 
+     if (strncmp(http, module_name, strlen(http)) == 0 || strncmp(https, module_name, strlen(https)) == 0) {
+@@ -91,11 +91,12 @@ JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *op
+     dbuf_init(&dbuf);
+ 
+     is_json = has_suffix(module_name, ".json");
++    is_bin = has_suffix(module_name, ".qjsbin");
+ 
+-    /* Support importing JSON files bcause... why not? */
++    /* Support importing JSON files because... why not? */
+     if (is_json)
+         dbuf_put(&dbuf, (const uint8_t *) json_tpl_start, strlen(json_tpl_start));
+-
++    
+     r = tjs__load_file(ctx, &dbuf, module_name);
+     if (r != 0) {
+         dbuf_free(&dbuf);
+@@ -107,22 +108,29 @@ JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *op
+         dbuf_put(&dbuf, (const uint8_t *) json_tpl_end, strlen(json_tpl_end));
+ 
+     /* Add null termination, required by JS_Eval. */
+-    dbuf_putc(&dbuf, '\0');
++    if (!is_bin)
++        dbuf_putc(&dbuf, '\0');
+ 
+-    /* compile JS the module */
+-    func_val = JS_Eval(ctx, (char *) dbuf.buf, dbuf.size - 1, module_name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+-    dbuf_free(&dbuf);
+-    if (JS_IsException(func_val)) {
+-        JS_FreeValue(ctx, func_val);
+-        return NULL;
++    if (is_bin) {
++        if (tjs__load_binary(ctx, dbuf.buf, dbuf.size, &func_val)) {
++            JS_FreeValue(ctx, func_val);
++            return NULL;
++        }
++    } else {
++        /* compile JS the module */
++        func_val = JS_Eval(ctx, (char *) dbuf.buf, dbuf.size - 1, module_name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
++        if (JS_IsException(func_val)) {
++            JS_FreeValue(ctx, func_val);
++            return NULL;
++        }
+     }
+ 
+     /* XXX: could propagate the exception */
+     js_module_set_import_meta(ctx, func_val, TRUE, FALSE);
++    dbuf_free(&dbuf);
+     /* the module is already referenced, so we must free it */
+     m = JS_VALUE_GET_PTR(func_val);
+     JS_FreeValue(ctx, func_val);
+-
+     return m;
+ }
+ 
+diff --git a/src/private.h b/src/private.h
+index e22a67c..12991d0 100644
+--- a/src/private.h
++++ b/src/private.h
+@@ -113,6 +113,7 @@ int js_module_set_import_meta(JSContext *ctx, JSValueConst func_val, JS_BOOL use
+ 
+ JSValue tjs__get_args(JSContext *ctx);
+ 
++int tjs__load_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len, JSValue* obj);
+ int tjs__eval_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len);
+ void tjs__bootstrap_globals(JSContext *ctx);
+ void tjs__add_builtins(JSContext *ctx);
+diff --git a/src/qjsc.c b/src/qjsc.c
+index c5dffba..cdcc5df 100644
+--- a/src/qjsc.c
++++ b/src/qjsc.c
+@@ -98,6 +98,20 @@ static namelist_t cmodule_list;
+ static namelist_t init_module_list;
+ static FILE *outfile;
+ static BOOL byte_swap;
++static BOOL binary;
++
++int print_c(FILE* out, char* fmt, ...)
++{
++    int rt = 0;
++    va_list args;
++    if (!binary)
++    {
++        va_start(args, fmt);
++        rt = vfprintf(out, fmt, args);
++        va_end(args);
++    }
++    return rt;
++}
+ 
+ void namelist_add(namelist_t *lp, const char *name, const char *short_name, int flags) {
+     namelist_entry_t *e;
+@@ -183,6 +197,11 @@ static void get_c_name2(char *buf, size_t buf_size, const char *file) {
+ 
+ static void dump_hex(FILE *f, const uint8_t *buf, size_t len) {
+     size_t i, col;
++
++    if (binary) {
++        fwrite(buf, 1, len, f);
++        return;
++    }
+     col = 0;
+     for (i = 0; i < len; i++) {
+         fprintf(f, " 0x%02x,", buf[i]);
+@@ -193,6 +212,7 @@ static void dump_hex(FILE *f, const uint8_t *buf, size_t len) {
+     }
+     if (col != 0)
+         fprintf(f, "\n");
++    return;
+ }
+ 
+ static void output_object_code(JSContext *ctx,
+@@ -215,10 +235,10 @@ static void output_object_code(JSContext *ctx,
+ 
+     namelist_add(&cname_list, c_name, NULL, load_only);
+ 
+-    fprintf(fo, "const uint32_t %s_size = %u;\n\n", c_name2, (unsigned int) out_buf_len);
+-    fprintf(fo, "const uint8_t %s[%u] = {\n", c_name2, (unsigned int) out_buf_len);
++    print_c(fo, "const uint32_t %s_size = %u;\n\n", c_name2, (unsigned int) out_buf_len);
++    print_c(fo, "const uint8_t %s[%u] = {\n", c_name2, (unsigned int) out_buf_len);
+     dump_hex(fo, out_buf, out_buf_len);
+-    fprintf(fo, "};\n\n");
++    print_c(fo, "};\n\n");
+ 
+     js_free(ctx, out_buf);
+ }
+@@ -300,7 +320,8 @@ void help(void) {
+            "-c          only output bytecode in a C file\n"
+            "-o output   set the output filename\n"
+            "-m          compile as Javascript module (default=autodetect)\n"
+-           "-x          byte swapped output\n");
++           "-x          byte swapped output\n"
++           "-b          produce binary bytecode\n");
+     exit(1);
+ }
+ 
+@@ -319,7 +340,7 @@ int main(int argc, char **argv) {
+     byte_swap = FALSE;
+ 
+     for (;;) {
+-        c = getopt(argc, argv, "ho:mx");
++        c = getopt(argc, argv, "ho:mxdb");
+         if (c == -1)
+             break;
+         switch (c) {
+@@ -334,6 +355,9 @@ int main(int argc, char **argv) {
+             case 'x':
+                 byte_swap = TRUE;
+                 break;
++            case 'b':
++                binary = TRUE;
++                break;
+             default:
+                 break;
+         }
+@@ -342,8 +366,12 @@ int main(int argc, char **argv) {
+     if (optind >= argc)
+         help();
+ 
+-    if (!out_filename)
+-        out_filename = "out.c";
++    if (!out_filename) {
++        if (binary)
++            out_filename = "out.qjsbin";
++        else
++            out_filename = "out.c";
++    }
+ 
+     pstrcpy(cfilename, sizeof(cfilename), out_filename);
+ 
+@@ -364,7 +392,7 @@ int main(int argc, char **argv) {
+     /* loader for ES6 modules */
+     JS_SetModuleLoaderFunc(rt, NULL, jsc_module_loader, NULL);
+ 
+-    fprintf(fo,
++    print_c(fo,
+             "/* File generated automatically by the QuickJS compiler. */\n"
+             "\n"
+             "#include <inttypes.h>\n"
+diff --git a/src/std.c b/src/std.c
+index 426697b..fdac4e8 100644
+--- a/src/std.c
++++ b/src/std.c
+@@ -38,7 +38,7 @@ static JSValue js_loadScript(JSContext *ctx, JSValueConst this_val, int argc, JS
+     filename = JS_ToCString(ctx, argv[0]);
+     if (!filename)
+         return JS_EXCEPTION;
+-    ret = TJS_EvalFile(ctx, filename, JS_EVAL_TYPE_GLOBAL, false, NULL);
++    ret = TJS_EvalFile(ctx, filename, JS_EVAL_TYPE_GLOBAL, false, NULL, false);
+     JS_FreeCString(ctx, filename);
+     return ret;
+ }
+diff --git a/src/tjs.h b/src/tjs.h
+index 668842c..232e657 100644
+--- a/src/tjs.h
++++ b/src/tjs.h
+@@ -47,7 +47,7 @@ JSContext *TJS_GetJSContext(TJSRuntime *qrt);
+ TJSRuntime *TJS_GetRuntime(JSContext *ctx);
+ void TJS_Run(TJSRuntime *qrt);
+ void TJS_Stop(TJSRuntime *qrt);
+-JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int eval_flags, bool is_main, char *override_filename);
++JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int eval_flags, bool is_main, char *override_filename, bool binary);
+ void TJS_RunRepl(JSContext *ctx);
+ 
+ #endif
+diff --git a/src/vm.c b/src/vm.c
+index ee3c9e8..5b9c4a6 100644
+--- a/src/vm.c
++++ b/src/vm.c
+@@ -405,10 +405,11 @@ int tjs__load_file(JSContext *ctx, DynBuf *dbuf, const char *filename) {
+     return r;
+ }
+ 
+-JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int flags, bool is_main, char *override_filename) {
++JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int flags, bool is_main, char *override_filename, bool binary) {
+     DynBuf dbuf;
+     size_t dbuf_size;
+     int r, eval_flags;
++    int status;
+     JSValue ret;
+ 
+     dbuf_init(&dbuf);
+@@ -421,6 +422,12 @@ JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int flags, bool is_ma
+ 
+     dbuf_size = dbuf.size;
+ 
++    if (binary) {
++        status = tjs__eval_binary(ctx, (const uint8_t*)dbuf.buf, dbuf_size);
++        is_main = true;
++        goto end;
++    }
++
+     /* Add null termination, required by JS_Eval. */
+     dbuf_putc(&dbuf, '\0');
+ 
+@@ -451,9 +458,11 @@ JSValue TJS_EvalFile(JSContext *ctx, const char *filename, int flags, bool is_ma
+                       override_filename != NULL ? override_filename : filename,
+                       eval_flags);
+     }
++    status = JS_IsException(ret);
+ 
++end:
+     /* Emit window 'load' event. */
+-    if (!JS_IsException(ret) && is_main) {
++    if (!status && is_main) {
+         static char emit_window_load[] = "window.dispatchEvent(new Event('load'));";
+         JSValue ret1 = JS_Eval(ctx, emit_window_load, strlen(emit_window_load), "<global>", JS_EVAL_TYPE_GLOBAL);
+         if (JS_IsException(ret1)) {
+diff --git a/src/worker.c b/src/worker.c
+index 1c1cd08..dfd7750 100644
+--- a/src/worker.c
++++ b/src/worker.c
+@@ -81,7 +81,7 @@ static JSValue worker_eval(JSContext *ctx, int argc, JSValueConst *argv) {
+         goto error;
+     }
+ 
+-    ret = TJS_EvalFile(ctx, filename, JS_EVAL_TYPE_MODULE, false, NULL);
++    ret = TJS_EvalFile(ctx, filename, JS_EVAL_TYPE_MODULE, false, NULL, false);
+     JS_FreeCString(ctx, filename);
+ 
+     if (JS_IsException(ret)) {
