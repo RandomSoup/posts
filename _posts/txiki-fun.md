@@ -1,4 +1,5 @@
 ---
+layout: post
 title: txiki.js fun
 author: Alvarito050506
 ---
